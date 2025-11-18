@@ -1129,49 +1129,47 @@ class RequestHandler {
     }
   }
 
-// [修改] 动态获取模型列表：改为复用原生请求构建逻辑，去除硬编码的 pageSize
+// [修改] 动态获取模型列表：设定适中的 pageSize 以覆盖所有活跃模型
 async processModelListRequest(req, res) {
   const requestId = this._generateRequestId();
   
-  // [关键修正] 使用 _buildProxyRequest 来构建基础请求对象
-  // 这样会保留客户端原始的 headers 和 query 参数（如果客户端没传 pageSize，则默认拉取 50 个，和原生一致）
   const proxyRequest = this._buildProxyRequest(req, requestId);
 
-  // 针对模型列表请求进行特定覆盖
-  proxyRequest.path = "/v1beta/models"; // 强制指向 Google 模型 API
-  proxyRequest.method = "GET";          // 确保方法为 GET
-  proxyRequest.body = null;             // GET 请求清空 Body
+  // 1. 强制指向 v1beta (通常模型最全)
+  proxyRequest.path = "/v1beta/models";
+  proxyRequest.method = "GET";
+  proxyRequest.body = null;
   proxyRequest.is_generative = false;
   proxyRequest.streaming_mode = "fake";
   proxyRequest.client_wants_stream = false;
   
-  // [注意] 这里删除了 query_params: { pageSize: 1000 } 的硬编码
-  // 现在它完全依赖 req.query，实现了与 Gemini 原生格式一致的请求行为
+  // 2. [关键修正] 设置一个“适中”的 pageSize。
+  // - 不传(默认): 可能只有 32 个 (你的现状)
+  // - 传 1000: 会拉到大量历史废弃模型 (你之前觉得太多)
+  // - 传 100: 足以覆盖当前的 ~37 个活跃模型，又不会拉取太古老的版本
+  proxyRequest.query_params = { ...req.query, pageSize: 100 };
 
-  this.logger.info(`[Adapter] 收到获取模型列表请求，正在转发至Google... (Request ID: ${requestId})`);
+  this.logger.info(`[Adapter] 收到获取模型列表请求，正在转发至Google (pageSize=100)... (Request ID: ${requestId})`);
   
   const messageQueue = this.connectionRegistry.createMessageQueue(requestId);
 
   try {
     this._forwardRequest(proxyRequest);
     
-    // 1. 等待响应头
     const headerMessage = await messageQueue.dequeue();
     if (headerMessage.event_type === "error") {
       throw new Error(headerMessage.message || "Upstream error");
     }
 
-    // 2. 循环接收数据直到流结束
     let fullBody = "";
     while (true) {
-      const message = await messageQueue.dequeue(60000); // 60秒超时
+      const message = await messageQueue.dequeue(60000);
       if (message.type === "STREAM_END") break;
       if (message.event_type === "chunk" && message.data) {
         fullBody += message.data;
       }
     }
 
-    // 3. 响应格式转换：Google JSON -> OpenAI JSON
     let googleModels = [];
     try {
       const googleResponse = JSON.parse(fullBody);
@@ -1181,7 +1179,6 @@ async processModelListRequest(req, res) {
     }
     
     const openaiModels = googleModels.map(model => {
-      // Google 格式: "models/gemini-pro" -> OpenAI 格式: "gemini-pro"
       const id = model.name.replace("models/", "");
       return {
         id: id,
@@ -1199,7 +1196,7 @@ async processModelListRequest(req, res) {
       data: openaiModels
     });
     
-    this.logger.info(`[Adapter] 成功获取并返回了 ${openaiModels.length} 个模型 (与原生请求保持一致)。`);
+    this.logger.info(`[Adapter] 成功获取并返回了 ${openaiModels.length} 个模型。`);
 
   } catch (error) {
     this.logger.error(`[Adapter] 获取模型列表失败: ${error.message}`);
