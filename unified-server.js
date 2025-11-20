@@ -700,10 +700,6 @@ class RequestHandler {
   }
 
   async _switchToNextAuth() {
-    if (this.authSource.availableIndices.length <= 1) {
-      this.logger.warn("[Auth] 😕 检测到只有一个可用账号，拒绝切换操作。");
-      throw new Error("Only one account is available, cannot switch.");
-    }
     if (this.isAuthSwitching) {
       this.logger.info("🔄 [Auth] 正在切换账号，跳过重复操作");
       return { success: false, reason: "Switch already in progress." };
