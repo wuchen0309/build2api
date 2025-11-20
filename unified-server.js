@@ -1129,7 +1129,7 @@ class RequestHandler {
     }
   }
 
-// [修改] 动态获取模型列表：设定适中的 pageSize 以覆盖所有活跃模型
+// [修改] 动态获取模型列表
 async processModelListRequest(req, res) {
   const requestId = this._generateRequestId();
   
@@ -1143,13 +1143,10 @@ async processModelListRequest(req, res) {
   proxyRequest.streaming_mode = "fake";
   proxyRequest.client_wants_stream = false;
   
-  // 2. [关键修正] 设置一个“适中”的 pageSize。
-  // - 不传(默认): 可能只有 32 个 (你的现状)
-  // - 传 1000: 会拉到大量历史废弃模型 (你之前觉得太多)
-  // - 传 100: 足以覆盖当前的 ~37 个活跃模型，又不会拉取太古老的版本
-  proxyRequest.query_params = { ...req.query, pageSize: 100 };
+  // 2. [修改] 不再强制指定 pageSize，直接使用请求自带的参数
+  proxyRequest.query_params = req.query;
 
-  this.logger.info(`[Adapter] 收到获取模型列表请求，正在转发至Google (pageSize=100)... (Request ID: ${requestId})`);
+  this.logger.info(`[Adapter] 收到获取模型列表请求，正在转发至Google... (Request ID: ${requestId})`);
   
   const messageQueue = this.connectionRegistry.createMessageQueue(requestId);
 
