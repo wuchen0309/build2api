@@ -982,7 +982,7 @@ class RequestHandler {
       client_wants_stream: true,
       // [核心] 传递续写配置
       resume_on_prohibit: this.serverSystem.enableResume,
-      resume_limit: 3
+      resume_limit: this.serverSystem.resumeLimit // [修改] 使用动态设置的重试次数
     };
 
     const messageQueue = this.connectionRegistry.createMessageQueue(requestId);
@@ -1242,9 +1242,31 @@ async processModelListRequest(req, res) {
     return `${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
   }
   _buildProxyRequest(req, requestId) {
+    // [修改] 增加对原生格式推理的强制注入逻辑
+    let finalBody = req.body;
+
+    // 如果启用了强制原生推理，且是生成内容的请求
+    if (this.serverSystem.enableNativeReasoning && 
+       (req.path.includes("generateContent") || req.path.includes("streamGenerateContent"))) {
+        try {
+            // 浅拷贝防止修改原始 req.body 产生副作用（虽然后续不太用得到）
+            // 或者使用 JSON.parse(JSON.stringify(req.body)) 深拷贝更安全
+            finalBody = JSON.parse(JSON.stringify(req.body));
+            
+            if (!finalBody.generationConfig) {
+                finalBody.generationConfig = {};
+            }
+            finalBody.generationConfig.thinkingConfig = { includeThoughts: true };
+            
+            this.logger.debug(`[Request] 已为请求 ${requestId} 强制注入 Native Thinking Config。`);
+        } catch(e) {
+            this.logger.warn(`[Request] 尝试注入 Native Thinking Config 失败: ${e.message}`);
+        }
+    }
+
     let requestBody = "";
-    if (req.body) {
-      requestBody = JSON.stringify(req.body);
+    if (finalBody) {
+      requestBody = JSON.stringify(finalBody);
     }
     return {
       path: req.path,
@@ -1256,7 +1278,7 @@ async processModelListRequest(req, res) {
       streaming_mode: this.serverSystem.streamingMode,
       // [核心] 传递续写配置
       resume_on_prohibit: this.serverSystem.enableResume,
-      resume_limit: 3
+      resume_limit: this.serverSystem.resumeLimit // [修改] 使用动态设置的重试次数
     };
   }
   _forwardRequest(proxyRequest) {
@@ -1861,8 +1883,12 @@ class ProxyServerSystem extends EventEmitter {
     
     // [新增] 默认为 false，用户可通过面板开启
     this.enableReasoning = false; 
-    // [新增] 续写开关
+    // [新增] 强制开启原生格式推理
+    this.enableNativeReasoning = false;
+    
+    // [新增] 续写开关和限制
     this.enableResume = false; 
+    this.resumeLimit = 3; // 默认最大重试3次
 
     this.authSource = new AuthSource(this.logger);
     this.browserManager = new BrowserManager(
@@ -2478,8 +2504,9 @@ class ProxyServerSystem extends EventEmitter {
       }">${!!browserManager.browser}</span>
 --- 服务配置 ---
 <span class="label">流模式</span>: ${config.streamingMode} (仅启用流式传输时生效)
-<span class="label">推理模式 (Thinking)</span>: <span class="${this.enableReasoning ? "status-info" : ""}">${this.enableReasoning ? "已启用 (注入thinkingConfig)" : "已禁用"}</span>
-<span class="label">截断自动续写</span>: <span class="${this.enableResume ? "status-info" : ""}">${this.enableResume ? "已启用 (自动续写)" : "已禁用"}</span>
+<span class="label">强制OAI格式推理 (OAI)</span>: <span class="${this.enableReasoning ? "status-info" : ""}">${this.enableReasoning ? "已启用 (注入thinkingConfig)" : "已禁用"}</span>
+<span class="label">强制原生格式推理 (Native)</span>: <span class="${this.enableNativeReasoning ? "status-info" : ""}">${this.enableNativeReasoning ? "已启用 (注入thinkingConfig)" : "已禁用"}</span>
+<span class="label">截断自动续写</span>: <span class="${this.enableResume ? "status-info" : ""}">${this.enableResume ? "已启用 (Limit: " + this.resumeLimit + ")" : "已禁用"}</span>
 <span class="label">立即切换 (状态码)</span>: ${
         config.immediateSwitchStatusCodes.length > 0
           ? `[${config.immediateSwitchStatusCodes.join(", ")}]`
@@ -2513,12 +2540,15 @@ class ProxyServerSystem extends EventEmitter {
                 <select id="accountIndexSelect">${accountOptionsHtml}</select>
                 <button onclick="switchSpecificAccount()">切换账号</button>
                 <button onclick="toggleStreamingMode()">切换流模式</button>
-                <button class="warning-btn" onclick="toggleReasoning()">切换推理模式</button>
-                <button class="purple-btn" onclick="toggleResume()">切换自动续写</button>
+                <button class="warning-btn" onclick="toggleReasoning()">强制开启OAI格式推理</button>
+                <button class="warning-btn" style="background-color: #d35400; border-color: #d35400;" onclick="toggleNativeReasoning()">强制开启原生格式推理</button>
+                <button class="purple-btn" onclick="configureResume()">设置自动续写</button>
             </div>
         </div>
         </div>
         <script>
+        let currentResumeLimit = 3;
+
         function updateContent() {
             fetch('/api/status').then(response => response.json()).then(data => {
                 const statusPre = document.querySelector('#status-section pre');
@@ -2528,15 +2558,22 @@ class ProxyServerSystem extends EventEmitter {
                 
                 const reasoningClass = data.status.enableReasoning ? "status-info" : "";
                 const reasoningText = data.status.enableReasoning ? "已启用 (注入thinkingConfig)" : "已禁用";
+                
+                const nativeReasoningClass = data.status.enableNativeReasoning ? "status-info" : "";
+                const nativeReasoningText = data.status.enableNativeReasoning ? "已启用 (注入thinkingConfig)" : "已禁用";
+                
                 const resumeClass = data.status.enableResume ? "status-info" : "";
-                const resumeText = data.status.enableResume ? "已启用 (自动续写)" : "已禁用";
+                const resumeText = data.status.enableResume ? ("已启用 (Limit: " + data.status.resumeLimit + ")") : "已禁用";
+                
+                currentResumeLimit = data.status.resumeLimit;
 
                 statusPre.innerHTML = 
                     '<span class="label">服务状态</span>: <span class="status-ok">Running</span>\\n' +
                     '<span class="label">浏览器连接</span>: <span class="' + (data.status.browserConnected ? "status-ok" : "status-error") + '">' + data.status.browserConnected + '</span>\\n' +
                     '--- 服务配置 ---\\n' +
                     '<span class="label">流模式</span>: ' + data.status.streamingMode + '\\n' +
-                    '<span class="label">推理模式 (Thinking)</span>: <span class="' + reasoningClass + '">' + reasoningText + '</span>\\n' +
+                    '<span class="label">强制OAI格式推理 (OAI)</span>: <span class="' + reasoningClass + '">' + reasoningText + '</span>\\n' +
+                    '<span class="label">强制原生格式推理 (Native)</span>: <span class="' + nativeReasoningClass + '">' + nativeReasoningText + '</span>\\n' +
                     '<span class="label">截断自动续写</span>: <span class="' + resumeClass + '">' + resumeText + '</span>\\n' +
                     '<span class="label">立即切换 (状态码)</span>: ' + data.status.immediateSwitchStatusCodes + '\\n' +
                     '<span class="label">API 密钥</span>: ' + data.status.apiKeySource + '\\n' +
@@ -2604,14 +2641,32 @@ class ProxyServerSystem extends EventEmitter {
             .catch(err => alert('切换失败: ' + err));
         }
 
-        function toggleResume() {
-             fetch('/api/toggle-resume', { 
+        function toggleNativeReasoning() {
+             fetch('/api/toggle-native-reasoning', { 
                 method: 'POST', 
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({}) 
              })
             .then(res => res.text()).then(data => { alert(data); updateContent(); })
             .catch(err => alert('切换失败: ' + err));
+        }
+
+        function configureResume() {
+            const input = prompt("【设置自动续写】\\n请输入最大重试次数 (默认为 3)\\n输入 0 即代表关闭此功能:", currentResumeLimit);
+            if (input === null) return; 
+            const limit = parseInt(input, 10);
+            if (isNaN(limit) || limit < 0) {
+                alert("请输入有效的正整数 (>=0)");
+                return;
+            }
+            
+            fetch('/api/set-resume-config', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ limit: limit }) 
+            })
+            .then(res => res.text()).then(data => { alert(data); updateContent(); })
+            .catch(err => alert('设置失败: ' + err));
         }
 
         document.addEventListener('DOMContentLoaded', () => {
@@ -2646,8 +2701,11 @@ class ProxyServerSystem extends EventEmitter {
           streamingMode: `${this.streamingMode} (仅启用流式传输时生效)`,
           // [新增] 返回推理模式状态
           enableReasoning: this.enableReasoning, 
+          // [新增] 返回原生推理模式状态
+          enableNativeReasoning: this.enableNativeReasoning,
           // [新增] 返回续写状态
           enableResume: this.enableResume,
+          resumeLimit: this.resumeLimit, // [新增] 返回次数限制
           browserConnected: !!browserManager.browser,
           immediateSwitchStatusCodes:
             config.immediateSwitchStatusCodes.length > 0
@@ -2729,23 +2787,39 @@ class ProxyServerSystem extends EventEmitter {
     });
     
     // ==========================================================
-    // [新增] 切换推理模式 (Toggle Reasoning) 接口
+    // [新增] 切换推理模式 (Toggle Reasoning) 接口 - 适配 OAI
     // ==========================================================
     app.post("/api/toggle-reasoning", isAuthenticated, (req, res) => {
       this.enableReasoning = !this.enableReasoning;
       const statusText = this.enableReasoning ? "已启用" : "已禁用";
-      this.logger.info(`[WebUI] 推理模式 (Thinking) 注入状态已切换为: ${statusText}`);
-      res.status(200).send(`推理模式(Thinking)${statusText}。所有新的 OpenAI 请求都将受此影响。`);
+      this.logger.info(`[WebUI] 强制OAI格式推理 (Thinking) 状态已切换为: ${statusText}`);
+      res.status(200).send(`强制OAI格式推理(Thinking)${statusText}。所有新的 OpenAI 格式请求都将受此影响。`);
     });
 
     // ==========================================================
-    // [新增] 切换续写模式 (Toggle Resume) 接口
+    // [新增] 切换原生推理模式 (Toggle Native Reasoning) 接口
     // ==========================================================
-    app.post("/api/toggle-resume", isAuthenticated, (req, res) => {
-      this.enableResume = !this.enableResume;
-      const statusText = this.enableResume ? "已启用" : "已禁用";
-      this.logger.info(`[WebUI] 截断自动续写功能已切换为: ${statusText}`);
-      res.status(200).send(`截断自动续写已${statusText}。如果遇到审核截断，系统将自动拼接上下文重试。`);
+    app.post("/api/toggle-native-reasoning", isAuthenticated, (req, res) => {
+      this.enableNativeReasoning = !this.enableNativeReasoning;
+      const statusText = this.enableNativeReasoning ? "已启用" : "已禁用";
+      this.logger.info(`[WebUI] 强制原生格式推理 (Native Thinking) 状态已切换为: ${statusText}`);
+      res.status(200).send(`强制原生格式推理${statusText}。所有原生 Gemini 格式请求都将自动注入 thinkingConfig。`);
+    });
+
+    // ==========================================================
+    // [新增] 设置续写配置 (Set Resume Config) 接口
+    // ==========================================================
+    app.post("/api/set-resume-config", isAuthenticated, (req, res) => {
+      const limit = parseInt(req.body.limit, 10);
+      if (isNaN(limit) || limit < 0) {
+          return res.status(400).send("无效的重试次数数值。");
+      }
+      this.resumeLimit = limit;
+      this.enableResume = limit > 0;
+      
+      const statusText = this.enableResume ? `已启用 (重试限制: ${limit})` : "已关闭";
+      this.logger.info(`[WebUI] 截断自动续写功能配置更新: ${statusText}`);
+      res.status(200).send(`自动续写功能${statusText}。`);
     });
 
     app.use(this._createAuthMiddleware());
