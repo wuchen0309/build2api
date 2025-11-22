@@ -980,6 +980,9 @@ class RequestHandler {
       is_generative: true,
       streaming_mode: "real",
       client_wants_stream: true,
+      // [核心] 传递续写配置
+      resume_on_prohibit: this.serverSystem.enableResume,
+      resume_limit: 3
     };
 
     const messageQueue = this.connectionRegistry.createMessageQueue(requestId);
@@ -1238,6 +1241,9 @@ async processModelListRequest(req, res) {
       body: requestBody,
       request_id: requestId,
       streaming_mode: this.serverSystem.streamingMode,
+      // [核心] 传递续写配置
+      resume_on_prohibit: this.serverSystem.enableResume,
+      resume_limit: 3
     };
   }
   _forwardRequest(proxyRequest) {
@@ -1709,7 +1715,6 @@ async processModelListRequest(req, res) {
     
     // =================================================================
     // [新增] 动态注入 Thinking / Reasoning 参数
-    // 如果用户在面板启用了 "推理模式"，则强行注入 thinkingConfig
     // =================================================================
     if (this.serverSystem.enableReasoning) {
         this.logger.info("[Adapter] 检测到推理模式已启用，正在注入 thinkingConfig...");
@@ -1829,6 +1834,8 @@ class ProxyServerSystem extends EventEmitter {
     
     // [新增] 默认为 false，用户可通过面板开启
     this.enableReasoning = false; 
+    // [新增] 续写开关
+    this.enableResume = false; 
 
     this.authSource = new AuthSource(this.logger);
     this.browserManager = new BrowserManager(
@@ -2223,7 +2230,6 @@ class ProxyServerSystem extends EventEmitter {
         font-weight: 600;
       }
 
-      /* 新增：输入框包装器，用于定位图标 */
       .input-wrapper {
         position: relative;
         width: 100%;
@@ -2233,7 +2239,6 @@ class ProxyServerSystem extends EventEmitter {
       input {
         width: 100%;
         padding: 14px;
-        /* 右边距留给小眼睛，防止文字重叠 */
         padding-right: 45px; 
         border: 1px solid #ddd;
         border-radius: 10px;
@@ -2242,7 +2247,7 @@ class ProxyServerSystem extends EventEmitter {
         background: #f9f9f9;
         -webkit-appearance: none;
         transition: all 0.2s;
-        margin-bottom: 0; /* margin交给wrapper处理 */
+        margin-bottom: 0; 
       }
       
       input:focus {
@@ -2251,7 +2256,6 @@ class ProxyServerSystem extends EventEmitter {
         box-shadow: 0 0 0 3px rgba(0,123,255,0.1);
       }
 
-      /* 小眼睛图标样式 */
       .toggle-eye {
         position: absolute;
         right: 12px;
@@ -2314,9 +2318,7 @@ class ProxyServerSystem extends EventEmitter {
         
         <div class="input-wrapper">
             <input type="password" id="apiKeyInput" name="apiKey" placeholder="请输入 API Key" required autofocus autocomplete="off">
-            <!-- 这里是用 SVG 画的眼睛 -->
             <div class="toggle-eye" id="toggleBtn">
-                <!-- 默认显示“闭眼”图标 (斜杠眼) 或者 “睁眼”图标，这里默认睁眼图标更直观表示“点击查看” -->
                 <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
             </div>
         </div>
@@ -2330,39 +2332,24 @@ class ProxyServerSystem extends EventEmitter {
       const input = document.getElementById('apiKeyInput');
       const toggleBtn = document.getElementById('toggleBtn');
       
-      // SVG 图标数据
       const eyeOpen = '<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>';
       const eyeClosed = '<svg viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>';
 
-      // 初始化图标状态：因为是password类型，所以现在的图标功能是“点击显示密码”
-      // 通常为了提示用户“这是密码”，默认显示“眼睛”（表示点击预览）或“闭眼”（表示当前是隐藏状态）
-      // 这里逻辑是：当前隐藏 -> 显示闭眼图标（代表隐藏状态） -> 点击变成睁眼。
-      // 或者：当前隐藏 -> 显示睁眼图标（代表点击动作） -> 点击变成闭眼。
-      // 我们采用更通用的：默认显示斜杠眼（闭眼），点击变睁眼。
       toggleBtn.innerHTML = eyeClosed;
 
       toggleBtn.addEventListener('click', (e) => {
-        // 防止点击切换时输入框失去焦点
         e.preventDefault();
-        
         const type = input.getAttribute('type') === 'password' ? 'text' : 'password';
         input.setAttribute('type', type);
-        
-        // 切换图标
         if (type === 'text') {
             toggleBtn.innerHTML = eyeOpen;
-            toggleBtn.style.color = '#007bff'; // 激活时眼睛变蓝
+            toggleBtn.style.color = '#007bff'; 
         } else {
             toggleBtn.innerHTML = eyeClosed;
             toggleBtn.style.color = '#999';
         }
-
-        // 重新聚焦，因为点击div可能会丢失焦点
-        // input.focus(); 
-        // 注释掉 focus：手机上频繁唤起键盘体验不好，用户只想看一眼密码而已
       });
 
-      // 之前的键盘遮挡优化
       const container = document.querySelector('.container');
       input.addEventListener('focus', () => {
         setTimeout(() => {
@@ -2441,6 +2428,7 @@ class ProxyServerSystem extends EventEmitter {
         .action-group button:hover { opacity: 0.85; }
         .action-group button { background-color: #007bff; color: white; border-color: #007bff; }
         .action-group button.warning-btn { background-color: #f39c12; border-color: #f39c12; }
+        .action-group button.purple-btn { background-color: #9b59b6; border-color: #8e44ad; }
         .action-group select { background-color: #ffffff; color: #000000; -webkit-appearance: none; appearance: none; }
         @media (max-width: 600px) {
             body { padding: 0.5em; }
@@ -2464,6 +2452,7 @@ class ProxyServerSystem extends EventEmitter {
 --- 服务配置 ---
 <span class="label">流模式</span>: ${config.streamingMode} (仅启用流式传输时生效)
 <span class="label">推理模式 (Thinking)</span>: <span class="${this.enableReasoning ? "status-info" : ""}">${this.enableReasoning ? "已启用 (注入thinkingConfig)" : "已禁用"}</span>
+<span class="label">截断自动续写</span>: <span class="${this.enableResume ? "status-info" : ""}">${this.enableResume ? "已启用 (自动续写)" : "已禁用"}</span>
 <span class="label">立即切换 (状态码)</span>: ${
         config.immediateSwitchStatusCodes.length > 0
           ? `[${config.immediateSwitchStatusCodes.join(", ")}]`
@@ -2498,6 +2487,7 @@ class ProxyServerSystem extends EventEmitter {
                 <button onclick="switchSpecificAccount()">切换账号</button>
                 <button onclick="toggleStreamingMode()">切换流模式</button>
                 <button class="warning-btn" onclick="toggleReasoning()">切换推理模式</button>
+                <button class="purple-btn" onclick="toggleResume()">切换自动续写</button>
             </div>
         </div>
         </div>
@@ -2511,6 +2501,8 @@ class ProxyServerSystem extends EventEmitter {
                 
                 const reasoningClass = data.status.enableReasoning ? "status-info" : "";
                 const reasoningText = data.status.enableReasoning ? "已启用 (注入thinkingConfig)" : "已禁用";
+                const resumeClass = data.status.enableResume ? "status-info" : "";
+                const resumeText = data.status.enableResume ? "已启用 (自动续写)" : "已禁用";
 
                 statusPre.innerHTML = 
                     '<span class="label">服务状态</span>: <span class="status-ok">Running</span>\\n' +
@@ -2518,6 +2510,7 @@ class ProxyServerSystem extends EventEmitter {
                     '--- 服务配置 ---\\n' +
                     '<span class="label">流模式</span>: ' + data.status.streamingMode + '\\n' +
                     '<span class="label">推理模式 (Thinking)</span>: <span class="' + reasoningClass + '">' + reasoningText + '</span>\\n' +
+                    '<span class="label">截断自动续写</span>: <span class="' + resumeClass + '">' + resumeText + '</span>\\n' +
                     '<span class="label">立即切换 (状态码)</span>: ' + data.status.immediateSwitchStatusCodes + '\\n' +
                     '<span class="label">API 密钥</span>: ' + data.status.apiKeySource + '\\n' +
                     '--- 账号状态 ---\\n' +
@@ -2584,6 +2577,16 @@ class ProxyServerSystem extends EventEmitter {
             .catch(err => alert('切换失败: ' + err));
         }
 
+        function toggleResume() {
+             fetch('/api/toggle-resume', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}) 
+             })
+            .then(res => res.text()).then(data => { alert(data); updateContent(); })
+            .catch(err => alert('切换失败: ' + err));
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
             updateContent(); 
             setInterval(updateContent, 5000);
@@ -2616,6 +2619,8 @@ class ProxyServerSystem extends EventEmitter {
           streamingMode: `${this.streamingMode} (仅启用流式传输时生效)`,
           // [新增] 返回推理模式状态
           enableReasoning: this.enableReasoning, 
+          // [新增] 返回续写状态
+          enableResume: this.enableResume,
           browserConnected: !!browserManager.browser,
           immediateSwitchStatusCodes:
             config.immediateSwitchStatusCodes.length > 0
@@ -2704,6 +2709,16 @@ class ProxyServerSystem extends EventEmitter {
       const statusText = this.enableReasoning ? "已启用" : "已禁用";
       this.logger.info(`[WebUI] 推理模式 (Thinking) 注入状态已切换为: ${statusText}`);
       res.status(200).send(`推理模式(Thinking)${statusText}。所有新的 OpenAI 请求都将受此影响。`);
+    });
+
+    // ==========================================================
+    // [新增] 切换续写模式 (Toggle Resume) 接口
+    // ==========================================================
+    app.post("/api/toggle-resume", isAuthenticated, (req, res) => {
+      this.enableResume = !this.enableResume;
+      const statusText = this.enableResume ? "已启用" : "已禁用";
+      this.logger.info(`[WebUI] 截断自动续写功能已切换为: ${statusText}`);
+      res.status(200).send(`截断自动续写已${statusText}。如果遇到审核截断，系统将自动拼接上下文重试。`);
     });
 
     app.use(this._createAuthMiddleware());

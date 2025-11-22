@@ -331,50 +331,128 @@ class ProxySystem extends EventTarget {
   async _processProxyRequest(requestSpec) {
     const operationId = requestSpec.request_id;
     const mode = requestSpec.streaming_mode || "fake";
+    // === 获取续写配置 ===
+    const resumeEnabled = requestSpec.resume_on_prohibit === true;
+    const resumeLimit = requestSpec.resume_limit || 3;
+    // =================
     
+    // 续写循环变量
+    let currentSpec = requestSpec;
+    let headersSent = false;
+    let accumulatedSinceLastRetry = "";
+    let retryCount = 0;
+
     try {
-      if (this.requestProcessor.cancelledOperations.has(operationId)) {
-        throw new DOMException("The user aborted a request.", "AbortError");
-      }
-      const { responsePromise } = this.requestProcessor.execute(
-        requestSpec,
-        operationId
-      );
-      const response = await responsePromise;
-      if (this.requestProcessor.cancelledOperations.has(operationId)) {
-        throw new DOMException("The user aborted a request.", "AbortError");
-      }
-
-      this._transmitHeaders(response, operationId);
-      
-      // 如果是HEAD请求，可能没有body，直接结束
-      if (!response.body) {
-          this._transmitStreamEnd(operationId);
-          return;
-      }
-
-      const reader = response.body.getReader();
-      const textDecoder = new TextDecoder();
-      let fullBody = "";
-
+      // 开启循环以支持断点续传
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = textDecoder.decode(value, { stream: true });
-
-        if (mode === "real") {
-          this._transmitChunk(chunk, operationId);
-        } else {
-          fullBody += chunk;
+        if (this.requestProcessor.cancelledOperations.has(operationId)) {
+          throw new DOMException("The user aborted a request.", "AbortError");
         }
-      }
 
-      if (mode === "fake") {
-        this._transmitChunk(fullBody, operationId);
-      }
+        const { responsePromise } = this.requestProcessor.execute(
+          currentSpec,
+          operationId
+        );
+        const response = await responsePromise;
+
+        if (this.requestProcessor.cancelledOperations.has(operationId)) {
+            throw new DOMException("The user aborted a request.", "AbortError");
+        }
+
+        if (!headersSent) {
+          this._transmitHeaders(response, operationId);
+          headersSent = true;
+        }
+        
+        if (!response.body) {
+            this._transmitStreamEnd(operationId);
+            return;
+        }
+
+        const reader = response.body.getReader();
+        const textDecoder = new TextDecoder();
+        let wasProhibited = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = textDecoder.decode(value, { stream: true });
+
+          if (mode === "real") {
+            // === 续写检测逻辑 ===
+            if (resumeEnabled) {
+                // 尝试解析数据块以查找 finishReason
+                const lines = chunk.split('\n');
+                for (const line of lines) {
+                    if (!line.trim().startsWith('data:')) continue;
+                    const jsonStr = line.replace(/^data:\s*/, '').trim();
+                    if (!jsonStr) continue;
+                    try {
+                        const data = JSON.parse(jsonStr);
+                        const finishReason = data.candidates?.[0]?.finishReason;
+                        
+                        // 检查是否因为安全原因截断
+                        if (finishReason === 'PROHIBITED_CONTENT' || finishReason === 'SAFETY') {
+                            Logger.output(`⚠️ 检测到内容截断: ${finishReason} (尝试 ${retryCount + 1}/${resumeLimit + 1})`);
+                            wasProhibited = true;
+                            break; 
+                        }
+                        
+                        // 累积文本，以防下次需要
+                        const textPart = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+                        accumulatedSinceLastRetry += textPart;
+                    } catch (e) {}
+                }
+            }
+
+            if (wasProhibited) break; // 跳出读取流循环，准备重试
+            this._transmitChunk(chunk, operationId);
+          } else {
+             // Fake 模式不支持自动续写，直接转发
+             this._transmitChunk(chunk, operationId);
+          }
+        } // End Reader Loop
+
+        // === 处理续写 ===
+        if (resumeEnabled && wasProhibited && retryCount < resumeLimit) {
+            Logger.output(`🔄 正在准备上下文拼接续写...`);
+            try {
+                let bodyObj = JSON.parse(currentSpec.body);
+                if (!bodyObj.contents) bodyObj.contents = [];
+
+                const lastMsg = bodyObj.contents[bodyObj.contents.length - 1];
+                
+                // 预填充逻辑：将刚才生成的文本作为 model 的回复追加到历史记录中
+                if (lastMsg && lastMsg.role === 'model') {
+                    if (!lastMsg.parts) lastMsg.parts = [{ text: "" }];
+                    lastMsg.parts[0].text += accumulatedSinceLastRetry;
+                } else {
+                    bodyObj.contents.push({
+                        role: "model",
+                        parts: [{ text: accumulatedSinceLastRetry }]
+                    });
+                }
+
+                currentSpec.body = JSON.stringify(bodyObj);
+                accumulatedSinceLastRetry = "";
+                retryCount++;
+                
+                Logger.output(`✅ 上下文拼接完成，发起重试请求...`);
+                continue; // 继续最外层的 while(true) 循环，使用新的 Body 发起请求
+
+            } catch (e) {
+                Logger.output(`❌ 构造续写请求失败: ${e.message}`);
+                break;
+            }
+        }
+
+        // 正常完成或次数用尽
+        break;
+      } // End Main While Loop
 
       this._transmitStreamEnd(operationId);
+      
     } catch (error) {
       if (error.name === "AbortError") {
         Logger.output(`[诊断] 操作 #${operationId} 已被用户中止。`);
