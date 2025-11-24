@@ -338,87 +338,87 @@ class BrowserManager {
         }
       });
 
-this.logger.info('[Browser] (步骤1/5) 准备点击 "Code" 按钮...');
+      this.logger.info('[Browser] (步骤1/5) 准备点击 "Code" 按钮...');
 
-// 等待按钮出现（但不死等它可点击，只等它存在于DOM中）
-try {
-  await this.page.waitForSelector('button:has-text("Code")', { state: 'attached', timeout: 15000 });
-} catch (e) {
-  this.logger.warn("等待 Code 按钮 DOM 出现超时，尝试直接盲点...");
-}
-
-for (let i = 1; i <= 5; i++) {
-  try {
-    this.logger.info(`  [尝试 ${i}/5] 执行多策略点击...`);
-
-    // --- 策略 A: Playwright 暴力点击 (force: true 无视遮罩) ---
-    let clicked = false;
-    try {
-        const codeBtn = this.page.locator('button:text("Code")').first();
-        if (await codeBtn.count() > 0) {
-            // force: true 是关键，它会跳过 Playwright 的 "可见性" 和 "遮挡" 检查
-            await codeBtn.click({ force: true, timeout: 3000 });
-            this.logger.info("  ✅ (策略A) Playwright 强制点击成功！");
-            clicked = true;
-        }
-    } catch (e) { /* 忽略 A 失败 */ }
-
-    if (clicked) break;
-
-    // --- 策略 B: 原生 JS 注入点击 (穿透力最强) ---
-    const jsResult = await this.page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll('button'));
-      const target = buttons.find(b => b.innerText && b.innerText.trim() === 'Code');
-      if (target) {
-          // HTMLElement.click() 是浏览器原生行为，完全无视界面遮罩
-          target.click(); 
-          return true;
+      // 等待按钮出现（但不死等它可点击，只等它存在于DOM中）
+      try {
+        await this.page.waitForSelector('button:has-text("Code")', { state: 'attached', timeout: 15000 });
+      } catch (e) {
+        this.logger.warn("等待 Code 按钮 DOM 出现超时，尝试直接盲点...");
       }
-      return false;
-    });
 
-    if (jsResult) {
-        this.logger.info("  ✅ (策略B) 原生 JS 点击触发成功！");
-        break;
-    }
+      for (let i = 1; i <= 5; i++) {
+        try {
+          this.logger.info(`  [尝试 ${i}/5] 执行多策略点击...`);
 
-    // --- 策略 C: 模拟鼠标事件 (兜底方案) ---
-    const dispatchResult = await this.page.evaluate(() => {
-       const buttons = Array.from(document.querySelectorAll('button'));
-       const target = buttons.find(b => b.innerText && b.innerText.trim() === 'Code');
-       if (target) {
-           const evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-           target.dispatchEvent(evt);
-           return true;
-       }
-       return false;
-    });
+          // --- 策略 A: Playwright 暴力点击 (force: true 无视遮罩) ---
+          let clicked = false;
+          try {
+            const codeBtn = this.page.locator('button:text("Code")').first();
+            if (await codeBtn.count() > 0) {
+              // force: true 是关键，它会跳过 Playwright 的 "可见性" 和 "遮挡" 检查
+              await codeBtn.click({ force: true, timeout: 3000 });
+              this.logger.info("  ✅ (策略A) Playwright 强制点击成功！");
+              clicked = true;
+            }
+          } catch (e) { /* 忽略 A 失败 */ }
 
-    if (dispatchResult) {
-         this.logger.info("  ✅ (策略C) 鼠标事件派发成功！");
-         break;
-    }
-    
-    this.logger.warn(`  [尝试 ${i}/5] 本轮点击未生效，清理环境后重试...`);
-    
-    // 只有在点击失败后，才尝试清理遮罩，防止误删正常元素
-    await this.page.evaluate(() => {
-       document.querySelectorAll('.cdk-overlay-backdrop, .cdk-overlay-container').forEach(e => e.remove());
-    });
-    
-    await this.page.waitForTimeout(1000);
-    
-    if (i === 5) {
-       // 保存截图以便调试
-       const screenshotPath = path.join(__dirname, "debug_failure_click.png");
-       await this.page.screenshot({ path: screenshotPath, fullPage: true }).catch(()=>{});
-       throw new Error("所有点击策略耗尽，无法打开代码编辑器。");
-    }
-  } catch (error) {
-    this.logger.warn(`  [尝试 ${i}/5] 异常: ${error.message}`);
-    if (i === 5) throw error;
-  }
-}
+          if (clicked) break;
+
+          // --- 策略 B: 原生 JS 注入点击 (穿透力最强) ---
+          const jsResult = await this.page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const target = buttons.find(b => b.innerText && b.innerText.trim() === 'Code');
+            if (target) {
+              // HTMLElement.click() 是浏览器原生行为，完全无视界面遮罩
+              target.click();
+              return true;
+            }
+            return false;
+          });
+
+          if (jsResult) {
+            this.logger.info("  ✅ (策略B) 原生 JS 点击触发成功！");
+            break;
+          }
+
+          // --- 策略 C: 模拟鼠标事件 (兜底方案) ---
+          const dispatchResult = await this.page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const target = buttons.find(b => b.innerText && b.innerText.trim() === 'Code');
+            if (target) {
+              const evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+              target.dispatchEvent(evt);
+              return true;
+            }
+            return false;
+          });
+
+          if (dispatchResult) {
+            this.logger.info("  ✅ (策略C) 鼠标事件派发成功！");
+            break;
+          }
+
+          this.logger.warn(`  [尝试 ${i}/5] 本轮点击未生效，清理环境后重试...`);
+
+          // 只有在点击失败后，才尝试清理遮罩，防止误删正常元素
+          await this.page.evaluate(() => {
+            document.querySelectorAll('.cdk-overlay-backdrop, .cdk-overlay-container').forEach(e => e.remove());
+          });
+
+          await this.page.waitForTimeout(1000);
+
+          if (i === 5) {
+            // 保存截图以便调试
+            const screenshotPath = path.join(__dirname, "debug_failure_click.png");
+            await this.page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+            throw new Error("所有点击策略耗尽，无法打开代码编辑器。");
+          }
+        } catch (error) {
+          this.logger.warn(`  [尝试 ${i}/5] 异常: ${error.message}`);
+          if (i === 5) throw error;
+        }
+      }
 
       this.logger.info(
         '[Browser] (步骤2/5) "Code" 按钮点击成功，等待编辑器变为可见...'
