@@ -288,6 +288,45 @@ class BrowserManager {
 
       await this.page.waitForTimeout(3000);
 
+      const currentUrl = this.page.url();
+      let pageTitle = "";
+      try { pageTitle = await this.page.title(); } catch (e) {}
+
+      // 1. 检查 Cookie 是否失效
+      if (
+        currentUrl.includes("accounts.google.com") ||
+        currentUrl.includes("ServiceLogin") ||
+        pageTitle.includes("Sign in")
+      ) {
+        this.logger.error(`🚨 [环境错误] 检测到重定向至登录页，初始化中断。`);
+        this.logger.error(`   👉 URL: ${currentUrl}`);
+        throw new Error(
+          "Cookie 已失效 (auth.json 过期)，浏览器被重定向到了 Google 登录页面，请重新提取。"
+        );
+      }
+
+      // 2. 检查 IP 地区限制
+      if (pageTitle.includes("Available regions")) {
+        this.logger.error(`🚨 [环境错误] 检测到地区不支持页面，初始化中断。`);
+        throw new Error(
+          "当前 IP 不支持访问 Google AI Studio (地区受限/送中)，请更换节点。"
+        );
+      }
+
+      // 3. 检查 IP 风控 (403)
+      if (pageTitle.includes("403") || pageTitle.includes("Forbidden")) {
+        this.logger.error(`🚨 [环境错误] 检测到 403 Forbidden，初始化中断。`);
+        throw new Error("当前 IP 被 Google 风控拒绝访问。");
+      }
+
+      // 4. 检查白屏 (网速极慢)
+      if (currentUrl === "about:blank") {
+        this.logger.error(
+          `🚨 [环境错误] 页面加载超时 (about:blank)，初始化中断。`
+        );
+        throw new Error("网络连接极差，无法加载页面。");
+      }
+
       this.logger.info(`[Browser] 正在检查 Cookie 同意横幅...`);
       try {
         const agreeButton = this.page.locator('button:text("Agree")');
@@ -351,26 +390,24 @@ class BrowserManager {
         try {
           this.logger.info(`  [尝试 ${i}/5] 执行多策略点击...`);
 
-          // --- 策略 A: Playwright 暴力点击 (force: true 无视遮罩) ---
+          // --- 策略 A: Playwright 暴力点击 ---
           let clicked = false;
           try {
             const codeBtn = this.page.locator('button:text("Code")').first();
-            if (await codeBtn.count() > 0) {
-              // force: true 是关键，它会跳过 Playwright 的 "可见性" 和 "遮挡" 检查
+            if ((await codeBtn.count()) > 0) {
               await codeBtn.click({ force: true, timeout: 3000 });
               this.logger.info("  ✅ (策略A) Playwright 强制点击成功！");
               clicked = true;
             }
-          } catch (e) { /* 忽略 A 失败 */ }
+          } catch (e) {}
 
           if (clicked) break;
 
-          // --- 策略 B: 原生 JS 注入点击 (穿透力最强) ---
+          // --- 策略 B: 原生 JS 点击 ---
           const jsResult = await this.page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const target = buttons.find(b => b.innerText && b.innerText.trim() === 'Code');
+            const buttons = Array.from(document.querySelectorAll("button"));
+            const target = buttons.find((b) => b.innerText?.trim() === "Code");
             if (target) {
-              // HTMLElement.click() 是浏览器原生行为，完全无视界面遮罩
               target.click();
               return true;
             }
@@ -382,12 +419,16 @@ class BrowserManager {
             break;
           }
 
-          // --- 策略 C: 模拟鼠标事件 (兜底方案) ---
+          // --- 策略 C: 鼠标事件派发 ---
           const dispatchResult = await this.page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const target = buttons.find(b => b.innerText && b.innerText.trim() === 'Code');
+            const buttons = Array.from(document.querySelectorAll("button"));
+            const target = buttons.find((b) => b.innerText?.trim() === "Code");
             if (target) {
-              const evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+              const evt = new MouseEvent("click", {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+              });
               target.dispatchEvent(evt);
               return true;
             }
@@ -399,24 +440,47 @@ class BrowserManager {
             break;
           }
 
-          this.logger.warn(`  [尝试 ${i}/5] 本轮点击未生效，清理环境后重试...`);
-
-          // 只有在点击失败后，才尝试清理遮罩，防止误删正常元素
+          // 失败处理：清理环境
+          this.logger.warn(`  [尝试 ${i}/5] 点击未生效，清理环境后重试...`);
           await this.page.evaluate(() => {
-            document.querySelectorAll('.cdk-overlay-backdrop, .cdk-overlay-container').forEach(e => e.remove());
+            document
+              .querySelectorAll(".cdk-overlay-backdrop, .cdk-overlay-container")
+              .forEach((e) => e.remove());
           });
-
           await this.page.waitForTimeout(1000);
 
           if (i === 5) {
-            // 保存截图以便调试
-            const screenshotPath = path.join(__dirname, "debug_failure_click.png");
-            await this.page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-            throw new Error("所有点击策略耗尽，无法打开代码编辑器。");
+            throw new Error("5次尝试均无法点击 Code 按钮");
           }
         } catch (error) {
-          this.logger.warn(`  [尝试 ${i}/5] 异常: ${error.message}`);
-          if (i === 5) throw error;
+          this.logger.warn(
+            `  [尝试 ${i}/5] 异常: ${error.message.split("\n")[0]}`
+          );
+
+          if (i === 5) {
+            this.logger.error(
+              "❌ [严重错误] 前置检查已通过，但仍无法点击按钮，可能是 Google UI 变更。"
+            );
+            
+            // 尝试截图并捕获截图失败的错误
+            try {
+              const screenshotPath = path.join(
+                __dirname,
+                "debug_failure_ui.png"
+              );
+              await this.page.screenshot({
+                path: screenshotPath,
+                fullPage: true,
+              });
+              this.logger.info(`📷 调试截图已保存: ${screenshotPath}`);
+            } catch (screenshotError) {
+              this.logger.warn(
+                `⚠️ 无法保存调试截图 (可能是容器无写入权限): ${screenshotError.message}`
+              );
+            }
+
+            throw new Error("UI 交互失败：找不到 Code 按钮。");
+          }
         }
       }
 
