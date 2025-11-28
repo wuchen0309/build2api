@@ -2607,7 +2607,7 @@ class ProxyServerSystem extends EventEmitter {
         </div>
     </div>
 
-    <script>
+<script>
         let isUpdating = false;
 
         function showToast(msg) {
@@ -2667,7 +2667,8 @@ class ProxyServerSystem extends EventEmitter {
 
         async function switchAccount() {
             const idx = document.getElementById('accountSelector').value;
-            if(!confirm(`确定切换到账号 #${idx} 吗？这会重置当前浏览器会话。`)) return;
+            // 下面这一行是修正后的代码：
+            if(!confirm(\`确定切换到账号 #\${idx} 吗？这会重置当前浏览器会话。\``)) return;
             
             showToast('正在切换账号...');
             try {
